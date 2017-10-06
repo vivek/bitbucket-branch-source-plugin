@@ -47,11 +47,35 @@ import com.cloudbees.jenkins.plugins.bitbucket.client.repository.BitbucketReposi
 import com.cloudbees.jenkins.plugins.bitbucket.client.repository.PaginatedBitbucketRepository;
 import com.cloudbees.jenkins.plugins.bitbucket.client.repository.UserRoleInRepository;
 import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+import com.google.common.collect.ImmutableList;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.ProxyConfiguration;
 import hudson.Util;
 import hudson.util.Secret;
+import jenkins.model.Jenkins;
+import net.sf.json.JSONObject;
+import org.apache.commons.httpclient.Credentials;
+import org.apache.commons.httpclient.HostConfiguration;
+import org.apache.commons.httpclient.HttpClient;
+import org.apache.commons.httpclient.HttpMethod;
+import org.apache.commons.httpclient.HttpState;
+import org.apache.commons.httpclient.HttpStatus;
+import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
+import org.apache.commons.httpclient.NameValuePair;
+import org.apache.commons.httpclient.URIException;
+import org.apache.commons.httpclient.UsernamePasswordCredentials;
+import org.apache.commons.httpclient.auth.AuthPolicy;
+import org.apache.commons.httpclient.auth.AuthScope;
+import org.apache.commons.httpclient.methods.DeleteMethod;
+import org.apache.commons.httpclient.methods.GetMethod;
+import org.apache.commons.httpclient.methods.PostMethod;
+import org.apache.commons.httpclient.methods.StringRequestEntity;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang.StringUtils;
+import org.codehaus.jackson.JsonNode;
+import org.codehaus.jackson.map.ObjectMapper;
+
 import java.io.ByteArrayOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -63,26 +87,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
-import jenkins.model.Jenkins;
-import net.sf.json.JSONObject;
-import org.apache.commons.httpclient.HostConfiguration;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpMethod;
-import org.apache.commons.httpclient.HttpState;
-import org.apache.commons.httpclient.HttpStatus;
-import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
-import org.apache.commons.httpclient.NameValuePair;
-import org.apache.commons.httpclient.URIException;
-import org.apache.commons.httpclient.UsernamePasswordCredentials;
-import org.apache.commons.httpclient.auth.AuthScope;
-import org.apache.commons.httpclient.methods.DeleteMethod;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.methods.PostMethod;
-import org.apache.commons.httpclient.methods.StringRequestEntity;
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
-import org.codehaus.jackson.JsonNode;
-import org.codehaus.jackson.map.ObjectMapper;
 
 public class BitbucketCloudApiClient implements BitbucketApi {
     private static final Logger LOGGER = Logger.getLogger(BitbucketCloudApiClient.class.getName());
@@ -95,7 +99,8 @@ public class BitbucketCloudApiClient implements BitbucketApi {
     private static final MultiThreadedHttpConnectionManager connectionManager = new MultiThreadedHttpConnectionManager();
     private final String owner;
     private final String repositoryName;
-    private final UsernamePasswordCredentials credentials;
+    private final Credentials credentials;
+    private final StandardUsernamePasswordCredentials jenkinsCredentials;
 
     static {
         connectionManager.getParams().setDefaultMaxConnectionsPerHost(20);
@@ -103,8 +108,13 @@ public class BitbucketCloudApiClient implements BitbucketApi {
     }
 
     public BitbucketCloudApiClient(String owner, String repositoryName, StandardUsernamePasswordCredentials creds) {
+        this.jenkinsCredentials = creds;
         if (creds != null) {
-            this.credentials = new UsernamePasswordCredentials(creds.getUsername(), Secret.toString(creds.getPassword()));
+            if(creds instanceof BitbucketConnectJwtCredentials){
+                this.credentials = new JwtHttpClientCredentials(((BitbucketConnectJwtCredentials) creds).getJwtToken());
+            }else {
+                this.credentials = new UsernamePasswordCredentials(creds.getUsername(), Secret.toString(creds.getPassword()));
+            }
         } else {
             this.credentials = null;
         }
@@ -167,8 +177,8 @@ public class BitbucketCloudApiClient implements BitbucketApi {
 
     @CheckForNull
     public String getLogin() {
-        if (credentials != null) {
-            return credentials.getUserName();
+        if (jenkinsCredentials != null) {
+            return jenkinsCredentials.getUsername();
         }
         return null;
     }
@@ -510,6 +520,10 @@ public class BitbucketCloudApiClient implements BitbucketApi {
             HttpClient client = new HttpClient(connectionManager);
             client.getParams().setConnectionManagerTimeout(10 * 1000);
             client.getParams().setSoTimeout(60 * 1000);
+            AuthPolicy.registerAuthScheme(BitbucketConnectJwtAuthScheme.scheme, BitbucketConnectJwtAuthScheme.class);
+            client.getParams().setParameter(AuthPolicy.AUTH_SCHEME_PRIORITY, ImmutableList.of(
+                    AuthPolicy.BASIC, BitbucketConnectJwtAuthScheme.scheme
+            ));
 
             if (credentials != null) {
                 client.getState().setCredentials(AuthScope.ANY, credentials);
